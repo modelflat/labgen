@@ -1,4 +1,7 @@
 *.txt
 *.bat
+*.lgt
+*.png
 
 .idea/
+*__pycache__/

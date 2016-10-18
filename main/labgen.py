@@ -37,31 +37,83 @@ class RangeObject:
 
 class Property:
 
-    def __init__(self, name, type_, object_type=None, default=None, single_value=True, subproperty=False):
+    def __init__(self, name, type_, object_type=None, default=None, single_value=True):
         self.default = default
         self.type = type_
         self.object_type = object_type
         self.name = name
         self.single_value = single_value
-        self.sub_property = subproperty
 
     def __str__(self):
         return "Property<name=\"%s\">" % (self.name,)
 
 
-class ObjectBuilder:
+# noinspection PyCallingNonCallable
+class Builder:
 
-    def __init__(self, object_name:str, obj_property: Property):
-        self.obj_property = obj_property
-        self.build_metadata = {}
-        self.name = obj_property.name
-        self.object_name = object_name
+    def __init__(self, possible_properties: dict, converters: dict):
+        self.possible_properties = possible_properties
+        self.converters = converters
+        self.metadata = {}
+        self.object_builder = None
 
-    def put(self, key, value):
-        self.build_metadata[key] = value
+    def process_value(self, type_name, value):
+        return self.get_converter_for_type(type_name)(value.strip())
+
+    def get_converter_for_type(self, type_name: str):
+        converter = self.converters.get(type_name, None)
+        if converter is None:
+            raise LabGenError("Converter for type %s not found" % (type_name,))
+        return converter
+
+    def put_into_object_builder(self, key: str, value: str):
+        if self.object_builder is None:
+            raise LabGenError("No object is currently being built: ." + key + "=" + value)
+        self.object_builder.put(key, value)
+
+    def flush_object_builder(self):
+        if self.object_builder is None:
+            return
+        self.put_processed(self.object_builder.property, self.object_builder.build())
+        self.object_builder = None
+
+    def put(self, key: str, value: str):
+        prop = self.possible_properties[key]
+        if prop.type == DatafileVariable.METADATA_VALUE_TYPE_BUILDER:
+            self.flush_object_builder()
+            self.object_builder = ObjectBuilder(self.process_value(DatafileVariable.METADATA_VALUE_TYPE_STR, value),
+                                                prop,
+                                                self.converters)
+        else:
+            self.put_processed(prop, self.process_value(prop.type, value))
+
+    def put_processed(self, prop: Property, processed_value: object):
+        self.metadata[prop.name] = processed_value if prop.single_value \
+            else (self.metadata.get(prop.name, []) + [processed_value, ])
 
     def build(self):
-        return self.obj_property.object_type(self.object_name, self.build_metadata)
+        # fill in default values
+        if self.object_builder:
+            self.flush_object_builder()
+        for prop in self.possible_properties.values():
+            if not (prop.name in self.metadata.keys()) \
+                    and prop.type != DatafileVariable.METADATA_VALUE_TYPE_BUILDER \
+                    and not prop.sub_property:
+                if prop.default is None:
+                    raise LabGenError("Value is not presented for required property %s" % (prop.name,))
+                self.put(prop, self.get_converter_for_property(prop)(prop.default))
+        return self.metadata
+
+
+class ObjectBuilder(Builder):
+
+    def __init__(self, object_name: str, builder_property: Property, converters: dict):
+        super().__init__(find_all_properties(builder_property.object_type), converters)
+        self.obj_name = object_name
+        self.property = builder_property
+
+    def build(self):
+        return self.property.object_type(self.obj_name, super().build())
 
 
 class DatafileVariable:
@@ -92,46 +144,16 @@ class DatafileVariable:
         self.label = "label_" + self.name
 
     def parse_metadata(self, string):
-        parsed, builder = {}, None
-
-        def put_value(prop_, processed_value):
-            nonlocal parsed
-            if prop_.single_value:
-                parsed[prop_.name] = processed_value
-            else:
-                parsed[prop_.name] = parsed.get(prop_.name, []) + [processed_value, ]
-
-        # 1. parse provided string for metadata
+        builder, last_were_object = Builder(self.properties, DatafileVariable.CONVERTERS), False
         for match in DatafileVariable.METADATA_PATTERN.finditer(string):
-            is_building_object_property, key, value = bool(match.group(1)), match.group(2), match.group(3)
-            if value is None: value = ""
-            prop = self.properties[key]
-            if prop.type == DatafileVariable.METADATA_VALUE_TYPE_BUILDER:
-                # flush old object if any and start building another
-                if builder:
-                    put_value(builder.obj_property, builder.build())
-                builder = ObjectBuilder(value, prop)
+            is_building_object_property, key, value = bool(match.group(1)), match.group(2), match.group(3) or ""
+            if is_building_object_property:
+                builder.put_into_object_builder(key, value)
             else:
-                # find a converter
-                converter = DatafileVariable.CONVERTERS[prop.type]
-                if is_building_object_property:
-                    if not builder:
-                        raise ValueError("No object is currently being built. Property: " + str(prop))
-                    builder.put(key, converter(value))
-                else:
-                    if builder:
-                        put_value(builder.obj_property, builder.build())
-                        builder = None
-                    put_value(prop, converter(value))
-        if builder:
-            put_value(builder.obj_property, builder.build())
-        # 2. locate and try to define defaults
-        for prop in self.properties.values():
-            if not (prop.name in parsed.keys()) and prop.object_type is None and not prop.sub_property:
-                if prop.default is None:
-                    raise ValueError("Value is not presented for required property %s" % (prop.name,))
-                put_value(prop, DatafileVariable.CONVERTERS[prop.type](prop.default))
-        self.metadata = parsed
+                if last_were_object:
+                    builder.flush_object_builder()
+                builder.put(key, value)
+        self.metadata = builder.build()
 
 
 class Table(DatafileVariable):
@@ -154,6 +176,22 @@ class Table(DatafileVariable):
 
 class Curve:
 
+    _PROP_COLOR = Property("color",
+                           DatafileVariable.METADATA_VALUE_TYPE_STR,
+                           default="black")
+    _PROP_STYLE = Property("style",
+                           DatafileVariable.METADATA_VALUE_TYPE_STR,
+                           default="lines+points")
+    _PROP_X = Property("x",
+                       DatafileVariable.METADATA_VALUE_TYPE_STR,
+                       default="x")
+    _PROP_Y = Property("y",
+                       DatafileVariable.METADATA_VALUE_TYPE_STR,
+                       default="y")
+    _PROP_SCOPE = Property("scope",
+                           DatafileVariable.METADATA_VALUE_TYPE_STR,
+                           default="")
+
     def __init__(self, name, metadata):
         self.name = name
         self.metadata = metadata
@@ -165,25 +203,19 @@ class Plot(DatafileVariable):
     DEFINITION = "${2}"
     DEFINITION_PATTERN = create_variable_pattern(DEFINITION, DEFINITION)
 
-    # TODO: cleanup property definitions
-    _PROP_AXES = Property("axes", DatafileVariable.METADATA_VALUE_TYPE_LIST,
+    _PROP_AXES = Property("axes",
+                          DatafileVariable.METADATA_VALUE_TYPE_LIST,
                           default="x;y")
-    _PROP_XRANGE = Property("xrange", DatafileVariable.METADATA_VALUE_TYPE_RANGE,
+    _PROP_XRANGE = Property("xrange",
+                            DatafileVariable.METADATA_VALUE_TYPE_RANGE,
                             default="autoscale")
-    _PROP_YRANGE = Property("yrange", DatafileVariable.METADATA_VALUE_TYPE_RANGE,
+    _PROP_YRANGE = Property("yrange",
+                            DatafileVariable.METADATA_VALUE_TYPE_RANGE,
                             default="autoscale")
-    _PROP_CURVE = Property("curve", DatafileVariable.METADATA_VALUE_TYPE_BUILDER,
-                           object_type=Curve, single_value=False)
-    _PROP_CURVE_COLOR = Property("color", DatafileVariable.METADATA_VALUE_TYPE_STR,
-                                 default="black", subproperty=True)
-    _PROP_CURVE_STYLE = Property("style", DatafileVariable.METADATA_VALUE_TYPE_STR,
-                                 default="lines+points", subproperty=True)
-    _PROP_CURVE_X = Property("x", DatafileVariable.METADATA_VALUE_TYPE_STR,
-                             default="x", subproperty=True)
-    _PROP_CURVE_Y = Property("y", DatafileVariable.METADATA_VALUE_TYPE_STR,
-                             default="y", subproperty=True)
-    _PROP_CURVE_SCOPE = Property("scope", DatafileVariable.METADATA_VALUE_TYPE_STR,
-                                 default="", subproperty=True)
+    _PROP_CURVE = Property("curve",
+                           DatafileVariable.METADATA_VALUE_TYPE_BUILDER,
+                           object_type=Curve,
+                           single_value=False)
 
     def __init__(self, name, human_readable_name, metadata):
         super().__init__(name, human_readable_name, metadata, find_all_properties(Plot))
@@ -258,8 +290,8 @@ class LabGen:
     #                                                               ^ put * here in case of troubles with
     # empty arguments
 
-    def __init__(self, temp_files_dir, template_files: list, data_files: list):
-        self.temp_files_dir = temp_files_dir
+    def __init__(self, output_dir, template_files: list, data_files: list):
+        self.output_dir = output_dir
         self.templates = LabGen.parse_template_files(template_files)
         self.tables, self.plots = LabGen.parse_datafiles(data_files)
         self.ast_interpreter = asteval.Interpreter(
@@ -332,6 +364,8 @@ class LabGen:
     def invoke_commands(self, string):
         def interceptor_func(match):
             command = COMMAND_DEFINITIONS.get(match.group(1))
+            if command is None:
+                raise LabGenError("No such command: @\"%s\"" % (match.group(1),))
             arg_dict = LabGen.parse_args(match.group(2) or "")
             print("invoking command %s with args %s" % (str(command), str(arg_dict)))
             return command(self, arg_dict)

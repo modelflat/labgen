@@ -47,17 +47,8 @@ class Command:
 # 1. Command core function name should start with COMMAND_DEF_PREFIX
 # 2. Command should take LabGen instance as first argument, any count of positional arguments and **kwargs
 
-def cmd_hello(parser, name, **kwargs):
-    return "Hello, %s" % (name,)
-
-
-def cmd_helloworld(parser, **kwargs):
-    return "Hello world!"
-
-
 def cmd_date(parser, **kwargs):
     return time.asctime()
-
 
 def cmd_labgen_dump(parser, **kwargs):
     return "{{\nHere was invoked labgen_dump command. The purpose of this command is " \

@@ -101,7 +101,7 @@ _table contents_ - contents of the table in form of row and cols. ! An empty lin
 
 * Metadata
 
-cols=value1; value2;... - specifies column names for table, splitted by `;`
+cols=value1; value2;... - specifies column names for table, separated with `;`
 
 #### Plot variable definition
 

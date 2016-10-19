@@ -2,6 +2,7 @@
 *.bat
 *.lgt
 *.png
+*.tex
 
 .idea/
 *__pycache__/

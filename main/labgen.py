@@ -2,8 +2,13 @@ import numpy as np
 import asteval
 import re
 import time
+import random
+import os
+import sys
+import argparse
 
 from matplotlib import pyplot as pp
+
 
 def create_variable_pattern(initiating_char, closing_char):
     processed = r"\{initiating_char}\s*(\w*)\s*(\\)?\s*(?(2)([^\n\r]*)|)$(.*?)\{closing_char}".format(
@@ -12,15 +17,19 @@ def create_variable_pattern(initiating_char, closing_char):
     )
     return re.compile(processed, re.M | re.U | re.S)
 
+
 def find_all_properties(clazz: type, prefix="_PROP_"):
     return {getattr(clazz, field_name).name: getattr(clazz, field_name)
             for field_name in dir(clazz) if field_name.startswith(prefix)}
 
+
 def get_method_arg_names(method):
     return method.__code__.co_varnames[:method.__code__.co_argcount]
 
+
 def str_dict_kv_per_line(d: dict):
     return "{\n\t" + "\n\t".join(["%s: %s" % (key, d[key]) for key in d.keys()]) + "\n}"
+
 
 def create_invocation_pattern(initiating_char, param_initiating_char, param_closing_char):
     processed = r"\{initiating_char}([\w_]+)(?:\s*\{param_initiating_char}(.*?)\{param_closing_char}|)".format(
@@ -31,8 +40,28 @@ def create_invocation_pattern(initiating_char, param_initiating_char, param_clos
     return re.compile(processed, re.M | re.U | re.S)
 
 
-class LabGenError(Exception):
+def remove_non_alphanum(string):
+    if not string:
+        return ""
+    return "".join(filter(lambda ch: ch.isalnum() or ch == "_", string))
 
+
+def random_str(length):
+    gen = hex(random.getrandbits(length * 4))[2:]
+    return ("0" * (length - len(gen))) + gen
+
+
+def generate_label(name: str):
+    return "label_" + remove_non_alphanum(name) + "_" + random_str(4)
+
+
+def list_files_with_ext(dir_path, ext):
+    return [dir_path + os.sep + filename for filename in
+            filter(lambda s: not os.path.isdir(dir_path + os.sep + s) and s.split(os.extsep)[-1] == ext,
+                   os.listdir(dir_path))]
+
+
+class LabGenError(Exception):
     def __init__(self, message):
         super().__init__(message)
 
@@ -52,7 +81,6 @@ class RangeObject:
 
 
 class Property:
-
     def __init__(self, name, type_, object_type=None, default=None, single_value=True):
         self.default = default
         self.type = type_
@@ -67,7 +95,6 @@ class Property:
 
 # noinspection PyCallingNonCallable
 class Builder:
-
     def __init__(self, possible_properties: dict, converters: dict):
         self.possible_properties = possible_properties
         self.converters = converters
@@ -114,16 +141,14 @@ class Builder:
             self.flush_object_builder()
         for prop in self.possible_properties.values():
             if not (prop.name in self.metadata.keys()) \
-                    and prop.type != DatafileVariable.METADATA_VALUE_TYPE_BUILDER \
-                    and not prop.sub_property:
+                    and prop.type != DatafileVariable.METADATA_VALUE_TYPE_BUILDER:
                 if prop.default is None:
                     raise LabGenError("Value is not presented for required property %s" % (prop.name,))
-                self.put(prop, prop.default)
+                self.put(prop.name, prop.default)
         return self.metadata
 
 
 class ObjectBuilder(Builder):
-
     def __init__(self, object_name: str, builder_property: Property, converters: dict):
         super().__init__(find_all_properties(builder_property.object_type), converters)
         self.obj_name = object_name
@@ -134,7 +159,6 @@ class ObjectBuilder(Builder):
 
 
 class DatafileVariable:
-
     METADATA_VALUE_TYPE_NUMBER = "number"
     METADATA_VALUE_TYPE_LIST = "list"
     METADATA_VALUE_TYPE_BUILDER = "builder"
@@ -158,7 +182,7 @@ class DatafileVariable:
         self.properties = properties
         self.metadata = None
         self.parse_metadata(metadata)
-        self.label = "label_" + self.name
+        self.label = generate_label(self.name)
 
     def parse_metadata(self, string):
         builder, last_were_object = Builder(self.properties, DatafileVariable.CONVERTERS), False
@@ -172,9 +196,13 @@ class DatafileVariable:
                 builder.put(key, value)
         self.metadata = builder.build()
 
+    def __str__(self):
+        return "name=\"%s\"; human_readable_name=\"%s\"; label=%s; metadata=\"%s\"" % (
+            self.name, self.human_readable_name, self.label, str(self.metadata)
+        )
+
 
 class Table(DatafileVariable):
-
     _PROP_COLS = Property("cols", DatafileVariable.METADATA_VALUE_TYPE_LIST)
 
     DEFINITION_PATTERN = re.compile(r"\^{2}\s*(\w*)\s*(\\)?\s*(?(2)([^\n\r]*))([^\^]*)\^{2}(?:(.*?)(?:\r*?\n){2}|)",
@@ -193,19 +221,18 @@ class Table(DatafileVariable):
         return "[" + ", ".join(["[" + " ".join(map(str, arr)) + "]" for arr in self.body]) + "]"
 
     def __str__(self):
-        return "Table<name=\"%s\"; human_readable_name=\"%s\"; metadata=\"%s\"; body=\"%s\"" % (
-            self.name, self.human_readable_name, str(self.metadata), self.body_as_one_line_string()
+        return "Table<%s; body=\"%s\">" % (
+            super().__str__(), self.body_as_one_line_string()
         )
 
 
 class Curve:
-
     _PROP_COLOR = Property("color",
                            DatafileVariable.METADATA_VALUE_TYPE_STR,
-                           default="black")
+                           default="black")  # TODO: research and decide, whether or not tthis property needed
     _PROP_STYLE = Property("style",
                            DatafileVariable.METADATA_VALUE_TYPE_STR,
-                           default="lines+points")
+                           default="-")
     _PROP_X = Property("x",
                        DatafileVariable.METADATA_VALUE_TYPE_STR,
                        default="x")
@@ -233,9 +260,11 @@ class Curve:
     def get_style(self):
         return self.metadata[self._PROP_STYLE.name]
 
+    def get_color(self):
+        return self.metadata[self._PROP_COLOR.name]
+
 
 class Image:
-
     def __init__(self, dpi, filename, tables_hash):
         self.dpi = dpi
         self.filename = filename
@@ -243,14 +272,11 @@ class Image:
 
     def __eq__(self, other):
         if type(other) == Image:
-            return other.dpi == self.dpi \
-                   and other.filename == self.filename \
-                   and other.tables_hash == self.tables_hash
+            return other.dpi == self.dpi and other.filename == self.filename and other.tables_hash == self.tables_hash
         return False
 
 
 class Plot(DatafileVariable):
-
     AUTOSCALE = "autoscale"
 
     DEFINITION = "${2}"
@@ -270,7 +296,7 @@ class Plot(DatafileVariable):
                            object_type=Curve,
                            single_value=False)
 
-    def __init__(self, name, human_readable_name, metadata, labgen_instance: LabGen):
+    def __init__(self, name, human_readable_name, metadata, labgen_instance):
         super().__init__(name, human_readable_name, metadata, find_all_properties(Plot))
         self.figure_name = "figure_" + self.name
         # needed to access tables
@@ -284,37 +310,48 @@ class Plot(DatafileVariable):
         :param dpi: not used yet
         :return: tuple: (bool - were image redrawn or not, str - path to image
         """
-        path = self.labgen_instance.output_dir + self.figure_name
-        img = Image(dpi or "default", path, hash(self.labgen_instance.tables))
+        path = self.labgen_instance.output_dir + os.sep + self.figure_name
+        # TODO: hash?!
+        img = Image(dpi or "default", path, hash(tuple(self.labgen_instance.tables.keys())))
         if img in self.images:
-            return (False, path)
+            return False, self.figure_name
         # TODO: optimize
-        interpreter = asteval.Interpreter({table.name: table.body.transpose() for table in self.labgen_instance.tables})
+        interpreter = asteval.Interpreter({table.name: table.body for table in self.labgen_instance.tables.values()})
         curves = self.metadata.get(Plot._PROP_CURVE.name, [])
-        curves_pp = []
-        for curve in curves:
-            x_expr, y_expr, scope = curve.get_expressions()
-            interpreter.eval(scope)  # prepare scope
-            curves_pp.append(interpreter.eval(x_expr))
-            curves_pp.append(interpreter.eval(y_expr))
-            curves_pp.append(curve.get_style())
-        xrange = self.metadata[self._PROP_XRANGE.name]
-        if xrange != Plot.AUTOSCALE:
-            pp.xlim(*xrange)
-        yrange = self.metadata[self._PROP_YRANGE.name]
-        if yrange != Plot.AUTOSCALE:
-            pp.ylim(*yrange)
         xlabel, ylabel = self.metadata[self._PROP_AXES.name]
         pp.xlabel(xlabel)
         pp.ylabel(ylabel)
+        # plot data
+        for curve in curves:
+            x_expr, y_expr, scope = curve.get_expressions()
+            interpreter.eval(scope)  # prepare scope
+            pp.plot(interpreter.eval(x_expr), interpreter.eval(y_expr),
+                    marker="o", linestyle=curve.get_style(), color=curve.get_color())
+        ###
+        xrange = self.metadata[self._PROP_XRANGE.name]
+        do_auto_x = False
+        if xrange != Plot.AUTOSCALE:
+            pp.xlim(xrange.start, xrange.stop)
+            do_auto_x = True
+        yrange = self.metadata[self._PROP_YRANGE.name]
+        do_auto_y = False
+        if yrange != Plot.AUTOSCALE:
+            pp.ylim(yrange.start, yrange.stop)
+            do_auto_y = True
+        if do_auto_x and do_auto_y:
+            pp.autoscale()
         # TODO: use dpi or smt to specify image size
-        pp.plot(*curves_pp)
+        # pp.plot(*curves_pp)
         pp.savefig(img.filename)
-        return (True, path)
+        return True, self.figure_name
+
+    def __str__(self):
+        return "Plot<%s; figure_name=%s; images=%s>" %(
+            super().__str__(), self.figure_name, str(self.images)
+        )
 
 
 class Template:
-
     # patterns and constants
     DEFINITION = "#{2}"
     PARAM_DEFINITION = "++"
@@ -374,6 +411,12 @@ class Template:
         )
 
 
+class Figure:
+    def __init__(self, name, ext, fullpath):
+        self.name, self.path, self.ext = name, fullpath, ext
+        self.label = generate_label(name)
+
+
 class Command:
     COMMAND_DEF_PREFIX = "cmd_"
     INVOCATION_PATTERN = create_invocation_pattern("@", "|{2}", "|{2}")
@@ -405,6 +448,7 @@ class Command:
 def cmd_date(parser, **kwargs):
     return time.asctime()
 
+
 def cmd_labgen_dump(parser, **kwargs):
     return "{{\nHere was invoked labgen_dump command. The purpose of this command is " \
            "to perform a dump on LabGen instance.\n" \
@@ -420,30 +464,57 @@ def cmd_labgen_dump(parser, **kwargs):
                cmd_date(parser)
            )
 
+
+def cmd_ref(parser, var_name, **kwargs):
+    var = parser.find_variable(var_name)
+    return "\\ref{%s}" % (var.label,)
+
+
+def cmd_fig(parser, name, hr_name, **kwargs):
+    fig = parser.figures[name]
+    scale = kwargs.get("scale", "1.0")
+    return r"""\begin{{figure}}[h!]
+        \noindent\centering{{
+            \includegraphics[scale={scale}]{{{name}}}
+        }}
+            \caption{{{caption}}}
+        \label{{{label}}}
+    \end{{figure}}""".format(
+        scale=scale,
+        name=fig.name,
+        caption=hr_name,
+        label=fig.label
+    )
+
+
 """
 Creates a plot image using pyplot
 """
-def cmd_plot(parser, plot_var, **kwargs):
-    # TODO : implement
-    return "(ref to "+ ")"
 
-"""
-Returns table label
-"""
-def cmd_table_label(parser, table_var, **kwargs):
-    return parser.tables[table_var].label
+
+def cmd_plot(parser, plot_var, **kwargs):
+    plot = parser.plots[plot_var]
+    dpi = kwargs.get("dpi", None)
+    is_redrawn, fig_name = plot.produce_image(dpi=dpi)
+    return cmd_fig(parser, fig_name, plot.human_readable_name, **kwargs)
+
 
 """
 Returns table name
 """
+
+
 def cmd_table_caption(parser, table_var, **kwargs):
     return parser.tables[table_var].human_readable_name
+
 
 """
 Generates table body
 
 kwargs: split_each=False, cast_to_int=False, precision=3
 """
+
+
 def cmd_table_body(parser, table_var, **kwargs):
     table = parser.tables[table_var]
     split_each = kwargs.get("split_each", False)
@@ -454,12 +525,15 @@ def cmd_table_body(parser, table_var, **kwargs):
         [np.array2string(row,
                          separator=" & ",
                          precision=precision,
-                         formatter={"all": lambda x: str(x if not cast_to_int else int(x))})[1:-1] # esc np default []
+                         formatter={"all": lambda x: str(x if not cast_to_int else int(x))})[1:-1]  # esc np default []
          + r" \\" for row in table.body.transpose()])
+
 
 """
 Generates full table
 """
+
+
 def cmd_table(parser, table_var, **kwargs):
     table = parser.tables[table_var]
     return r"""\begin{{table}}[{modifiers}]
@@ -476,7 +550,7 @@ def cmd_table(parser, table_var, **kwargs):
         modifiers=kwargs.get("modifiers", "h!"),
         caption=table.human_readable_name,
         label=table.label,
-        columns=("c|"*len(table.metadata["cols"]))[:-1],
+        columns=("c|" * len(table.metadata["cols"]))[:-1],
         table_body=cmd_table_body(parser, table_var, **kwargs)
     )
 
@@ -491,17 +565,27 @@ COMMAND_DEFINITIONS = {
             dir()))
     }
 
-class LabGen:
 
+class LabGen:
     ARGS_ITEM_PATTERN = re.compile(r"(?:\s*(\w*)\s*=\s*([^|]*)|([^|]+))\|?", re.U | re.M | re.S)
+
     #                                                    put * here ^ in case of troubles with empty arguments
 
-    def __init__(self, output_dir, template_files: list, data_files: list):
+    TEMPLATE_FILE_FORMAT = "lgt"
+    DATA_FILE_FORMAT = "lgd"
+    SOURCE_FILE_FORMAT = "lgs"
+    OUTPUT_FILE_FORMAT = "tex"
+
+    ALLOWED_FIGURE_FORMAT = ["png", "jpg", "eps", "svg", "jpeg", "gif"]
+
+    def __init__(self, output_dir, figures_dir, template_files: list, data_files: list):
         self.output_dir = output_dir
         self.templates = {}
-        LabGen.parse_template_files(*template_files)
+        self.parse_template_files(template_files)
         self.tables, self.plots = {}, {}
-        LabGen.parse_datafiles(*data_files)
+        self.parse_datafiles(data_files)
+        self.figures, self.figures_dir = {}, figures_dir
+        self.load_figures()
 
     @staticmethod
     def parse_args(string, strip_values=True):
@@ -516,35 +600,18 @@ class LabGen:
             position += 1
         return kwargs
 
-    def parse_template_files(self, *filename_list):
-        for filename in filename_list:
-            with open(filename, encoding="utf-8") as file:
-                for match in Template.DEFINITION_PATTERN.finditer(file.read()):
-                    template_name = match.group(1)
-                    # TODO: replace with logging facilities?
-                    print("Defining template \"%s\"" % (template_name,), end="... ")
-                    self.templates[template_name] = Template(template_name, match.group(4))
-                    template_params = self.templates[ template_name ].param_map
-                    # TODO: replace with logging facilities?
-                    print("required args: %s; other args: %s" % (
-                        list(filter(lambda k: template_params[k] is None, template_params.keys())),
-                        {key: template_params[key] for key in filter(lambda a: not (template_params[a] is None), template_params.keys())}
-                    ))
+    def find_variable(self, var_name):
+        for pool in (self.tables, self.plots, self.figures):
+            v = pool.get(var_name)
+            if not (v is None):
+                return v
+        raise LabGenError("no variable with name %s" % (var_name,))
 
-    def parse_datafiles(self, filename_list):
-        for filename in filename_list:
-            with open(filename, encoding="utf-8") as file:
-                string = file.read()
-                for match in Table.DEFINITION_PATTERN.finditer(string):
-                    name, hr_name, metadata, body = match.group(1), match.group(3), match.group(4), match.group(5)
-                    new_table = Table(name, hr_name, metadata.strip(), body.strip())
-                    # TODO: replace with logging facilities or remove?
-                    print("Created new table variable %s" % (self.tables[name],))
-                for match in Plot.DEFINITION_PATTERN.finditer(string):
-                    name, hr_name, metadata = match.group(1), match.group(3), match.group(4)
-                    self.plots[name] = Plot(name, hr_name, metadata, self)
-                    # TODO: replace with logging facilities or remove?
-                    print("Created new plot variable %s" % (self.plots[name],))
+    def get_scope(self):
+        return {"output_directory": self.output_dir,
+                "templates": self.templates,
+                "tables": self.tables,
+                "plots": self.plots}
 
     def _do_resolve_templates(self, string, outer_templates, recursion_level):
         def interceptor_func(match):
@@ -555,13 +622,14 @@ class LabGen:
             template = self.templates[template_name]
             substitution = LabGen.parse_args(match.group(2) or "")
             # TODO: replace with logging facilities?
-            print(recursion_level*"\t" +
+            print(recursion_level * "\t" +
                   "Applying substitution %s in %s invocation" % (
                       str(substitution),
                       "[" + "->".join(outer_templates) + ("->" if outer_templates else "") + template_name + "]"
                   ))
             return self._do_resolve_templates(template.interpolate_params(substitution),
                                               outer_templates + [template_name], recursion_level + 1)
+
         return Template.INVOCATION_PATTERN.sub(interceptor_func, string)
 
     def resolve_templates(self, string):
@@ -576,34 +644,145 @@ class LabGen:
             # TODO: replace with logging facilities?
             print("invoking command %s with args %s" % (str(command), str(arg_dict)))
             return command(self, arg_dict)
+
         return Command.INVOCATION_PATTERN.sub(interceptor_func, string)
 
     def render_string(self, string):
         # TODO: replace with logging facilities?
-        print("===== RENDER STAGE 1: RESOLVE TEMPLATES =====")
+        self._print_stage("RENDER STAGE 1: RESOLVE TEMPLATES")
         string = self.resolve_templates(string)
         # TODO: replace with logging facilities?
-        print("===== RENDER STAGE 2: INVOKE COMMANDS =====")
-        string = self.invoke_commands(string)
-        return string
+        self._print_stage("RENDER STAGE 2: INVOKE COMMANDS")
+        return self.invoke_commands(string)
+
+    def load_figures(self):
+        for file in os.listdir(self.figures_dir):
+            t = file.split(os.extsep)
+            if len(t) <= 1 or not (t[1] in self.ALLOWED_FIGURE_FORMAT):
+                # no ext
+                continue
+            else:
+                filename, ext = t[0].split(os.sep)[-1], t[1]
+                fig = Figure(filename, ext, self.figures_dir + os.sep + file)
+                print("Found image: %s; loaded with label %s" % (fig.name, fig.label))
+                self.figures[filename] = fig
+
+    def parse_template_file(self, filename, encoding="utf-8"):
+        # TODO: replace with logging facilities?
+        self._print_stage("STARTED PARSING TEMPLATE FILE %s" % (filename,))
+        try:
+            with open(filename, encoding=encoding) as file:
+                for match in Template.DEFINITION_PATTERN.finditer(file.read()):
+                    template_name = match.group(1)
+                    # TODO: replace with logging facilities?
+                    print("Defined template \"%s\"" % (template_name,), end="... ")
+                    self.templates[template_name] = Template(template_name, match.group(4))
+                    template_params = self.templates[template_name].param_map
+                    # TODO: replace with logging facilities?
+                    print("required args: %s; other args: %s" % (
+                        list(filter(lambda k: template_params[k] is None, template_params.keys())),
+                        {key: template_params[key] for key in
+                         filter(lambda a: not (template_params[a] is None), template_params.keys())}
+                    ))
+            # TODO: replace with logging facilities?
+        except Exception as e:
+            self._print_stage("ABORTED PARSING TEMPLATE FILE %s" % (filename,), exception=e)
+        else:
+            self._print_stage("COMPLETED PARSING TEMPLATE FILE %s" % (filename,))
+
+    def parse_template_files(self, filenames, encoding="utf-8"):
+        for filename in filenames:
+            if os.path.isdir(filename):
+                self.parse_template_files(list_files_with_ext(filename, LabGen.TEMPLATE_FILE_FORMAT), encoding)
+            else:
+                self.parse_template_file(filename, encoding)
+
+    def parse_datafile(self, filename, encoding="utf-8"):
+        self._print_stage("STARTED PARSING DATA FILE %s" % (filename,))
+        try:
+            with open(filename, encoding=encoding) as file:
+                string = file.read()
+                for match in Table.DEFINITION_PATTERN.finditer(string):
+                    name, hr_name, metadata, body = match.group(1), match.group(3), match.group(4), match.group(5)
+                    new_table = Table(name, hr_name, metadata.strip(), body.strip())
+                    self.tables[name] = new_table
+                    # TODO: replace with logging facilities or remove?
+                    print("Created new table variable %s" % (new_table,))
+                for match in Plot.DEFINITION_PATTERN.finditer(string):
+                    name, hr_name, metadata = match.group(1), match.group(3), match.group(4)
+                    self.plots[name] = Plot(name, hr_name, metadata, self)
+                    # TODO: replace with logging facilities or remove?
+                    print("Created new plot variable %s" % (self.plots[name],))
+        except Exception as e:
+            self._print_stage("ABORTED PARSING DATA FILE %s" % (filename,), exception=e)
+        else:
+            self._print_stage("COMPLETED PARSING DATA FILE %s" % (filename,))
+
+    def parse_datafiles(self, filenames, encoding="utf-8"):
+        for filename in filenames:
+            if os.path.isdir(filename):
+                self.parse_datafiles(list_files_with_ext(filename, LabGen.DATA_FILE_FORMAT), encoding)
+            else:
+                self.parse_datafile(filename, encoding)
 
     def render_file(self, filename, encoding="utf-8"):
         # TODO: replace with logging facilities?
-        print("===== STARTED RENDERING FILE %s" % (filename,))
-        result = None
-        with open(filename, encoding=encoding) as file:
-            result = self.render_string(file.read())
-        # TODO: replace with logging facilities?
-        print("===== COMPLETED RENDERING FILE %s" % (filename,))
-        return result
+        self._print_stage("STARTED RENDERING FILE %s" % (filename,))
+        try:
+            with open(filename, encoding=encoding) as file:
+                result = self.render_string(file.read())
+            # TODO: replace with logging facilities?
+        except Exception as e:
+            self._print_stage("ABORTED RENDERING FILE %s" % (filename,), exception=e)
+            return
+        else:
+            self._print_stage("COMPLETED RENDERING DATA FILE %s" % (filename,))
+            self.write_file(os.extsep.join(filename.split(os.extsep)[:-1] + [LabGen.OUTPUT_FILE_FORMAT,]),
+                            result,
+                            encoding=encoding)
 
-    def get_scope(self):
-        return {"output_directory": self.output_dir,
-                "templates": self.templates,
-                "tables": self.tables,
-                "plots": self.plots}
+    def render_files(self, filenames, encoding="utf-8"):
+        for filename in filenames:
+            if os.path.isdir(filename):
+                self.render_files(list_files_with_ext(filename, LabGen.SOURCE_FILE_FORMAT), encoding)
+            else:
+                self.render_file(filename, encoding=encoding)
+
+    def write_file(self, filename, contents, encoding="utf-8"):
+        self._print_stage("WRITING OUTPUT FILE %s" % (filename,))
+        try:
+            with open(filename, "w", encoding=encoding) as file:
+                file.write(contents)
+        except Exception as e:
+            self._print_stage("FAILED TO WRITE FILE %s" % (filename,), exception=e)
+        else:
+            self._print_stage("FILE WRITTEN %s" % (filename,))
+
+    @staticmethod
+    def _print_stage(stage, exception=None):
+        print("===== %s =====" % (stage,))
+        if not (exception is None):
+            print("===== REASON: " + str(exception))
+
+
+def prepare_command_line_args_parser():
+    parser = argparse.ArgumentParser(description="LabGen")
+
+    parser.add_argument("-o", "--output-dir", help="LabGen output directory")
+    parser.add_argument("-f", "--figures-dir", help="directory with usable figures. Following formats are possible: " +
+                                                    str(LabGen.ALLOWED_FIGURE_FORMAT))
+    parser.add_argument("--template-files", nargs="*", help="template files and/or dirs with .%s files" %
+                                                                  (LabGen.TEMPLATE_FILE_FORMAT,))
+    parser.add_argument("--data-files", nargs="*", help="data files and/or dirs with .%s files" %
+                                                              (LabGen.DATA_FILE_FORMAT,))
+    parser.add_argument("--source-files", nargs="*", help="source files and/or dirs with .%s files" %
+                                                                (LabGen.SOURCE_FILE_FORMAT,))
+    return parser
+
 
 if __name__ == '__main__':
-    p = LabGen("../test/", ["../table.lgt", "../tamplateLabs2.0.txt"], ["../datafile.txt"])
-    print(p.render_file("../test/test_source2.txt"))
+    namespace = prepare_command_line_args_parser().parse_args(args=sys.argv[1:])
 
+    lg = LabGen(namespace.output_dir, namespace.figures_dir, namespace.template_files, namespace.data_files)
+
+    lg.render_files(namespace.source_files)

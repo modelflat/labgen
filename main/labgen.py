@@ -487,35 +487,29 @@ def cmd_fig(parser, name, hr_name, **kwargs):
     )
 
 
-"""
-Creates a plot image using pyplot
-"""
-
-
 def cmd_plot(parser, plot_var, **kwargs):
+    """
+    Creates a plot image using pyplot
+    """
     plot = parser.plots[plot_var]
     dpi = kwargs.get("dpi", None)
     is_redrawn, fig_name = plot.produce_image(dpi=dpi)
     return cmd_fig(parser, fig_name, plot.human_readable_name, **kwargs)
 
 
-"""
-Returns table name
-"""
-
-
 def cmd_table_caption(parser, table_var, **kwargs):
+    """
+    Returns table name
+    """
     return parser.tables[table_var].human_readable_name
 
 
-"""
-Generates table body
-
-kwargs: split_each=False, cast_to_int=False, precision=3
-"""
-
-
 def cmd_table_body(parser, table_var, **kwargs):
+    """
+    Generates table body
+
+    kwargs: split_each=False, cast_to_int=False, precision=3
+    """
     table = parser.tables[table_var]
     split_each = kwargs.get("split_each", False)
     precision = int(kwargs.get("precision", 3))
@@ -529,12 +523,10 @@ def cmd_table_body(parser, table_var, **kwargs):
          + r" \\" for row in table.body.transpose()])
 
 
-"""
-Generates full table
-"""
-
-
 def cmd_table(parser, table_var, **kwargs):
+    """
+    Generates full table
+    """
     table = parser.tables[table_var]
     return r"""\begin{{table}}[{modifiers}]
         \caption{{{caption}}}

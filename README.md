@@ -4,6 +4,8 @@
 
 # LabGen - tool for generating laboratory work reports
 
+## !!! Docs are temporarily outdated, for usage ask `python labgen.py --help`, for HowTo-s try to read sources 
+
 * Usage
 ```
 python3 labgen.py [-h] [-o OUTPUT_DIR] [-f FIGURES_DIR]

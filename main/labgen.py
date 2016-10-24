@@ -264,18 +264,6 @@ class Curve:
         return self.metadata[self._PROP_COLOR.name]
 
 
-class Image:
-    def __init__(self, dpi, filename, tables_hash):
-        self.dpi = dpi
-        self.filename = filename
-        self.tables_hash = tables_hash
-
-    def __eq__(self, other):
-        if type(other) == Image:
-            return other.dpi == self.dpi and other.filename == self.filename and other.tables_hash == self.tables_hash
-        return False
-
-
 class Plot(DatafileVariable):
     AUTOSCALE = "autoscale"
 
@@ -301,20 +289,15 @@ class Plot(DatafileVariable):
         self.figure_name = "figure_" + self.name
         # needed to access tables
         self.labgen_instance = labgen_instance
-        self.images = []
 
-    def produce_image(self, dpi=None):
+    def produce_image(self, ext="png", dpi=None):
         """
         Produces an image of this plot and saves it to file inside LabGen output_dir
 
         :param dpi: not used yet
         :return: tuple: (bool - were image redrawn or not, str - path to image
         """
-        path = self.labgen_instance.output_dir + os.sep + self.figure_name
-        # TODO: hash?!
-        img = Image(dpi or "default", path, hash(tuple(self.labgen_instance.tables.keys())))
-        if img in self.images:
-            return False, self.figure_name
+        path = self.labgen_instance.figures_dir + os.sep + self.figure_name
         # TODO: optimize
         interpreter = asteval.Interpreter({table.name: table.body for table in self.labgen_instance.tables.values()})
         curves = self.metadata.get(Plot._PROP_CURVE.name, [])
@@ -342,12 +325,12 @@ class Plot(DatafileVariable):
             pp.autoscale()
         # TODO: use dpi or smt to specify image size
         # pp.plot(*curves_pp)
-        pp.savefig(img.filename)
+        pp.savefig(path)
         return True, self.figure_name
 
     def __str__(self):
-        return "Plot<%s; figure_name=%s; images=%s>" %(
-            super().__str__(), self.figure_name, str(self.images)
+        return "Plot<%s; figure_name=%s>" %(
+            super().__str__(), self.figure_name
         )
 
 
@@ -412,9 +395,11 @@ class Template:
 
 
 class Figure:
-    def __init__(self, name, ext, fullpath):
-        self.name, self.path, self.ext = name, fullpath, ext
-        self.label = generate_label(name)
+    def __init__(self, full_path):
+        self.path = full_path
+        self.ext = os.path.splitext(full_path)[-1]
+        self.name = os.path.basename(full_path)
+        self.label = generate_label(self.name)
 
 
 class Command:
@@ -471,7 +456,7 @@ def cmd_ref(parser, var_name, **kwargs):
 
 
 def cmd_fig(parser, name, hr_name, **kwargs):
-    fig = parser.figures[name]
+    fig = parser.get_figure(name + os.extsep + kwargs.get("ext", "png"))
     scale = kwargs.get("scale", "1.0")
     return r"""\begin{{figure}}[h!]
         \noindent\centering{{
@@ -481,7 +466,7 @@ def cmd_fig(parser, name, hr_name, **kwargs):
         \label{{{label}}}
     \end{{figure}}""".format(
         scale=scale,
-        name=fig.name,
+        name=fig.path,
         caption=hr_name,
         label=fig.label
     )
@@ -560,7 +545,6 @@ COMMAND_DEFINITIONS = {
 
 class LabGen:
     ARGS_ITEM_PATTERN = re.compile(r"(?:\s*(\w*)\s*=\s*([^|]*)|([^|]+))\|?", re.U | re.M | re.S)
-
     #                                                    put * here ^ in case of troubles with empty arguments
 
     TEMPLATE_FILE_FORMAT = "lgt"
@@ -571,12 +555,12 @@ class LabGen:
     ALLOWED_FIGURE_FORMAT = ["png", "jpg", "eps", "svg", "jpeg", "gif"]
 
     def __init__(self, output_dir, figures_dir, template_files: list, data_files: list):
-        self.output_dir = output_dir
+        self.output_dir = os.path.normpath(output_dir)
         self.templates = {}
         self.parse_template_files(template_files)
-        self.tables, self.plots = {}, {}
+        self.tables, self.plots, self.constants = {}, {}, {}
         self.parse_datafiles(data_files)
-        self.figures, self.figures_dir = {}, figures_dir
+        self.figures, self.figures_dir = {}, os.path.normpath(figures_dir)
         self.load_figures()
 
     @staticmethod
@@ -655,9 +639,19 @@ class LabGen:
                 continue
             else:
                 filename, ext = t[0].split(os.sep)[-1], t[1]
-                fig = Figure(filename, ext, self.figures_dir + os.sep + file)
+                fig = Figure(self.figures_dir + os.sep + filename)
                 print("Found image: %s; loaded with label %s" % (fig.name, fig.label))
                 self.figures[filename] = fig
+
+    def get_figure(self, figure_name):
+        figure = self.figures.get(figure_name)
+        if not (figure is None):
+            return figure
+        path = self.figures_dir + os.sep + figure_name
+        if not os.path.exists(path):
+            raise LabGenError("no such file: " + path)
+        self.figures[figure_name] = fig = Figure(path)
+        return fig
 
     def parse_template_file(self, filename, encoding="utf-8"):
         # TODO: replace with logging facilities?
@@ -683,7 +677,7 @@ class LabGen:
             self._print_stage("COMPLETED PARSING TEMPLATE FILE %s" % (filename,))
 
     def parse_template_files(self, filenames, encoding="utf-8"):
-        for filename in filenames:
+        for filename in map(os.path.normpath, filenames):
             if os.path.isdir(filename):
                 self.parse_template_files(list_files_with_ext(filename, LabGen.TEMPLATE_FILE_FORMAT), encoding)
             else:
@@ -711,7 +705,7 @@ class LabGen:
             self._print_stage("COMPLETED PARSING DATA FILE %s" % (filename,))
 
     def parse_datafiles(self, filenames, encoding="utf-8"):
-        for filename in filenames:
+        for filename in map(os.path.normpath, filenames):
             if os.path.isdir(filename):
                 self.parse_datafiles(list_files_with_ext(filename, LabGen.DATA_FILE_FORMAT), encoding)
             else:
@@ -726,15 +720,15 @@ class LabGen:
             # TODO: replace with logging facilities?
         except Exception as e:
             self._print_stage("ABORTED RENDERING FILE %s" % (filename,), exception=e)
-            return
         else:
             self._print_stage("COMPLETED RENDERING DATA FILE %s" % (filename,))
-            self.write_file(os.extsep.join(filename.split(os.extsep)[:-1] + [LabGen.OUTPUT_FILE_FORMAT,]),
+            self.write_file(self.output_dir + os.sep +
+                            os.path.splitext(os.path.basename(filename))[0] + os.extsep + LabGen.OUTPUT_FILE_FORMAT,
                             result,
                             encoding=encoding)
 
     def render_files(self, filenames, encoding="utf-8"):
-        for filename in filenames:
+        for filename in map(os.path.normpath, filenames):
             if os.path.isdir(filename):
                 self.render_files(list_files_with_ext(filename, LabGen.SOURCE_FILE_FORMAT), encoding)
             else:

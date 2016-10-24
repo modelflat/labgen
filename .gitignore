@@ -1,6 +1,10 @@
 *.txt
 *.bat
+
 *.lgt
+*.lgs
+*.lgd
+
 *.png
 *.tex
 

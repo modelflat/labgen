@@ -12,11 +12,9 @@ from matplotlib import pyplot as pp
 
 
 def create_variable_pattern(initiating_char, closing_char):
-    processed = r"\{initiating_char}\s*(\w*)\s*(\\)?\s*(?(2)([^\n\r]*)|)$(.*?)\{closing_char}".format(
-        initiating_char=initiating_char,
-        closing_char=closing_char
-    )
-    return re.compile(processed, re.M | re.U | re.S)
+    p = r"\{initiating_char}\s*(?P<name>\w*)\s*(\\)?\s*(?(2)(?P<caption>[^\n\r]*)|)$(?P<info>.*?)\{closing_char}"\
+        .format(initiating_char=initiating_char, closing_char=closing_char)
+    return re.compile(p, re.M | re.U | re.S)
 
 
 def find_all_properties(clazz: type, prefix="_PROP_"):
@@ -33,11 +31,9 @@ def str_dict_kv_per_line(d: dict):
 
 
 def create_invocation_pattern(initiating_char, param_initiating_char, param_closing_char):
-    processed = r"\{initiating_char}([\w_]+)(?:\s*\{param_initiating_char}(.*?)\{param_closing_char}|)".format(
-        initiating_char=initiating_char,
-        param_initiating_char=param_initiating_char,
-        param_closing_char=param_closing_char
-    )
+    processed = r"\{initiating_char}(?P<var>[\w_]+)(?:\s*\{param_initiating_char}(?P<args>.*?)\{param_closing_char}|)"\
+        .format(initiating_char=initiating_char, param_initiating_char=param_initiating_char,
+                param_closing_char=param_closing_char)
     return re.compile(processed, re.M | re.U | re.S)
 
 
@@ -215,7 +211,7 @@ class DatafileVariable:
     }
 
     METADATA_PATTERN = \
-        re.compile(r"^(\.?)(\w+)\s*=(?:$|\s*(.*))",
+        re.compile(r"^(?P<dot_prefix>\.?)(?P<key>\w+)\s*=(?:$|\s*(?P<value>.*))",
                    re.M | re.U)
 
     def __init__(self, name, human_readable_name, metadata, properties):
@@ -229,7 +225,9 @@ class DatafileVariable:
     def parse_metadata(self, string):
         builder, last_were_object = Builder(self.properties, DatafileVariable.CONVERTERS), False
         for match in DatafileVariable.METADATA_PATTERN.finditer(string):
-            is_building_object_property, key, value = bool(match.group(1)), match.group(2), match.group(3) or ""
+            is_building_object_property, key, value = bool(match.group("dot_prefix")), \
+                                                      match.group("key"), \
+                                                      match.group("value") or ""
             if is_building_object_property:
                 builder.put_into_object_builder(key, value)
             else:
@@ -249,9 +247,11 @@ class Table(DatafileVariable):
     _PROP_META = Property("meta", DatafileVariable.METADATA_VALUE_TYPE_BOOL, default="0")
     _PROP_STACK = Property("stack", DatafileVariable.METADATA_VALUE_TYPE_LIST, default="")
 
-    DEFINITION_PATTERN = re.compile(r"\^{2}\s*(\w*)\s*(\\)?\s*(?(2)([^\n\r]*))([^\^]*)\^{2}(?:(.*?)(?:\r*?\n){2}|)",
-                                    re.S)
-    META_STACK_COLS_PATTERN = re.compile(r"(\d+)\s*,?")
+    DEFINITION_PATTERN = re.compile(
+        r"\^{2}\s*(?P<name>\w*)\s*(\\)?\s*(?(2)(?P<caption>[^\n\r]*))"
+        r"(?P<metadata>[^\^]*)\^{2}(?:(?P<body>.*?)(?:\r*?\n){2}|)",
+        re.S)
+    META_STACK_COLS_PATTERN = re.compile(r"(?P<col_number>\d+)\s*,?")
 
     def __init__(self, name, human_readable_name, metadata, body):
         super().__init__(name, human_readable_name, metadata, find_all_properties(Table))
@@ -268,7 +268,7 @@ class Table(DatafileVariable):
             t = table_pool[e[0]]
             foreign_cols = t.metadata[Table._PROP_COLS.name]
             if len(e) > 1:
-                for i in map(lambda m: int(m.group(1)), Table.META_STACK_COLS_PATTERN.finditer(e[1])):
+                for i in map(lambda m: int(m.group("col_number")), Table.META_STACK_COLS_PATTERN.finditer(e[1])):
                     self.cols.append(foreign_cols[i])
                     final_columns.append(t.body[i])
             else:
@@ -402,7 +402,7 @@ class Template:
     PARAM_DEFINITION = "++"
     OPT_DEFINITION = "@@"
     DEFINITION_PATTERN = create_variable_pattern(DEFINITION, DEFINITION)
-    PARAM_INTERPOLATION_PATTERN = re.compile("%{2}([\w_]*)", re.U | re.M)
+    PARAM_INTERPOLATION_PATTERN = re.compile("%{2}(?P<var>[\w_]*)", re.U | re.M)
     INVOCATION_PATTERN = create_invocation_pattern("#", "|{2}", "|{2}")
 
     def __init__(self, name: str, body: str):
@@ -434,7 +434,7 @@ class Template:
 
     def interpolate_params(self, substitution):
         def interceptor_func(match):
-            param = match.group(1)
+            param = match.group("var")
             position = self.param_positions.get(param, None)
             if position is None:
                 # parameter does not exists
@@ -610,7 +610,7 @@ COMMAND_DEFINITIONS = {
 
 
 class LabGen:
-    ARGS_ITEM_PATTERN = re.compile(r"(?:\s*(\w*)\s*=\s*([^|]*)|([^|]+))\|?", re.U | re.M | re.S)
+    ARGS_ITEM_PATTERN = re.compile(r"(?:\s*(?P<key>\w*)\s*=\s*(?P<kwarg>[^|]*)|(?P<arg>[^|]+))\|?", re.U | re.M | re.S)
     #                                                    put * here ^ in case of troubles with empty arguments
 
     LOGGER_FORMATTER = logging.Formatter("[%(levelname)s] %(asctime)s %(name)s %(funcName)s: %(message)s")
@@ -641,11 +641,13 @@ class LabGen:
         kwargs = {}
         position = 0
         for match in LabGen.ARGS_ITEM_PATTERN.finditer(string):
-            key = match.group(1)
+            key = match.group("key")
             if key is None:
-                kwargs[position] = match.group(3).strip() if strip_values else match.group(3)
+                a = match.group("arg")
+                kwargs[position] = a.strip() if strip_values else a
             else:
-                kwargs[key] = match.group(2).strip() if strip_values else match.group(2)
+                kw = match.group("kwarg")
+                kwargs[key] = kw.strip() if strip_values else kw
             position += 1
         return kwargs
 
@@ -669,11 +671,11 @@ class LabGen:
     def _resolve_templates(self, string, outer_templates, recursion_level):
         def interceptor_func(match):
             nonlocal outer_templates, recursion_level
-            template_name = match.group(1)
+            template_name = match.group("var")
             if outer_templates and template_name == outer_templates[-1]:
                 raise LabGenError("Recursive template calls are not allowed. Stack: " + str(outer_templates))
             template = self.templates[template_name]
-            substitution = LabGen.parse_args(match.group(2) or "")
+            substitution = LabGen.parse_args(match.group("args") or "")
             self.log.info(recursion_level * "\t" +
                           "Applying substitution %s in %s invocation" % (
                               str(substitution),
@@ -689,10 +691,10 @@ class LabGen:
 
     def invoke_commands(self, string):
         def interceptor_func(match):
-            command = COMMAND_DEFINITIONS.get(match.group(1))
+            command = COMMAND_DEFINITIONS.get(match.group("var"))
             if command is None:
-                raise LabGenError("No such command: @\"%s\"" % (match.group(1),))
-            arg_dict = LabGen.parse_args(match.group(2) or "")
+                raise LabGenError("No such command: @\"%s\"" % (match.group("var"),))
+            arg_dict = LabGen.parse_args(match.group("args") or "")
             self.log.info("invoking command %s with args %s" % (str(command), str(arg_dict)))
             return command(self, arg_dict)
 
@@ -706,32 +708,29 @@ class LabGen:
 
     def parse_templates(self, string):
         for match in Template.DEFINITION_PATTERN.finditer(string):
-            template_name = match.group(1)
-            self.log.info("Defined template \"%s\"" % (template_name,), end="... ")
-            self.templates[template_name] = Template(template_name, match.group(4))
-            template_params = self.templates[template_name].param_map
-            self.log.info("required args: %s; other args: %s" % (
-                list(filter(lambda k: template_params[k] is None, template_params.keys())),
-                {key: template_params[key] for key in
-                 filter(lambda a: not (template_params[a] is None), template_params.keys())}
-            ))
+            template_name = match.group("name")
+            self.templates[template_name] = t = Template(template_name, match.group("info"))
+            self.log.info("Defined template \"%s\"" % (str(t),))
 
     def parse_data(self, string):
         # we do this in 3 stages
         # 1. parse all tables
         for match in Table.DEFINITION_PATTERN.finditer(string):
-            name, hr_name, metadata, body = match.group(1), match.group(3), match.group(4), match.group(5)
+            name, hr_name, metadata, body = match.group("name"), \
+                                            match.group("caption"), \
+                                            match.group("metadata"), \
+                                            match.group("body")
             new_table = Table(name, hr_name, metadata.strip(), body.strip())
             self.tables[name] = new_table
             self.log.info("Created new table variable %s" % (new_table,))
-        # process metatables and so
+        # process meta-tables and so
         for table in self.tables.values():
             table.process_meta_properties(self.tables)
         # 2. parse all constants
         pass
         # 3. parse all plots
         for match in Plot.DEFINITION_PATTERN.finditer(string):
-            name, hr_name, metadata = match.group(1), match.group(3), match.group(4)
+            name, hr_name, metadata = match.group("name"), match.group("caption"), match.group("info")
             self.plots[name] = Plot(name, hr_name, metadata, self)
             self.log.info("Created new plot variable %s" % (self.plots[name],))
 
